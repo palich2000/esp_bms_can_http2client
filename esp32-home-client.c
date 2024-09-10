@@ -45,6 +45,8 @@ static int do_exit = 0;
 
 void publish_sensors(void);
 
+void mqtt_publish_lwt(bool online);
+
 void wd_sleep(int secs) {
     extern int do_exit;
     int s = secs;
@@ -112,7 +114,7 @@ size_t write_callback(const void *data, size_t size, size_t nmemb, void *userp) 
     const char *EOL = "\r\n";
     const char *p = data;
     size_t len = size * nmemb;
-
+    //daemon_log(LOG_INFO, "Event");
     enum event_t event = EVENT_UNKNOWN;
 
     while (p < (char *) (data + len)) {
@@ -127,7 +129,13 @@ size_t write_callback(const void *data, size_t size, size_t nmemb, void *userp) 
             if (event_tmp != EVENT_UNKNOWN) {
                 event = event_tmp;
             }
-
+            if (event == EVENT_LOG) {
+                char *data = strstr(buf, "data:");
+                if (data) {
+                    data += strlen("data:");
+                    daemon_log(LOG_INFO, "%s", data);
+                }
+            }
             if (event == EVENT_STATE) {
                 char *data = strstr(buf, "data:");
                 if (data) {
@@ -162,6 +170,70 @@ size_t write_callback(const void *data, size_t size, size_t nmemb, void *userp) 
     return size * nmemb;
 }
 
+int debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr) {
+    (void) handle;
+    (void) userptr;
+
+    switch (type) {
+        case CURLINFO_TEXT: {
+            daemon_log(LOG_INFO, "INFO: %.*s", (int) size - 1, data);
+            char *str = alloca(size + 1);
+            if (str) {
+                memcpy(str, data, size);
+                str[size] = 0;
+                if (strstr(str, "Failed to connect")) {
+                    daemon_log(LOG_ERR, "Connection failed");
+                    mqtt_publish_lwt(false);
+                }
+            }
+        }
+            break;
+        case CURLINFO_HEADER_IN: {
+            daemon_log(LOG_INFO, "HEADER IN: %.*s", (int) size - 1, data);
+            char *str = alloca(size + 1);
+            if (str) {
+                memcpy(str, data, size);
+                str[size] = 0;
+                if (strstr(str, "Connection: keep-alive")) {
+                    daemon_log(LOG_INFO, "Connected");
+                    mqtt_publish_lwt(true);
+                }
+            }
+        }
+            break;
+        case CURLINFO_HEADER_OUT:
+            daemon_log(LOG_INFO, "HEADER OUT: %.*s", (int) size - 1, data);
+            break;
+        case CURLINFO_DATA_IN:
+            //printf("DATA IN: %zu bytes\n", size);
+            break;
+        case CURLINFO_DATA_OUT:
+            //printf("DATA OUT: %zu bytes\n", size);
+            break;
+        case CURLINFO_SSL_DATA_IN:
+        case CURLINFO_SSL_DATA_OUT:
+            //printf("SSL DATA: %zu bytes\n", size);
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+int progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void) clientp;
+    (void) ultotal;
+    (void) ulnow;
+    (void) dltotal;
+    (void) dlnow;
+
+    if (do_exit) {
+        daemon_log(LOG_ERR, "Stopping curl_easy_perform()...");
+        return 1;
+    }
+    return 0;
+}
+
 void *main_loop(void *UNUSED(param)) {
     CURLcode res = CURLE_OK;
 
@@ -174,6 +246,7 @@ void *main_loop(void *UNUSED(param)) {
         CURL *curl = curl_easy_init();
         if (!curl) {
             daemon_log(LOG_ERR, "curl_easy_init error");
+            mqtt_publish_lwt(false);
             return NULL;
         }
 
@@ -186,9 +259,22 @@ void *main_loop(void *UNUSED(param)) {
 
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, debug_callback);
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
+
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+
         res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
             daemon_log(LOG_ERR, "Query error: %s", curl_easy_strerror(res));
+            mqtt_publish_lwt(false);
+            if (!do_exit) {
+                wd_sleep(10);
+            }
         }
 
         curl_easy_cleanup(curl);
