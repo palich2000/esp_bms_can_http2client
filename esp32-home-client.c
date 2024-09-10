@@ -176,7 +176,7 @@ int debug_callback(CURL *handle, curl_infotype type, char *data, size_t size, vo
 
     switch (type) {
         case CURLINFO_TEXT: {
-            daemon_log(LOG_INFO, "INFO: %.*s", (int) size - 1, data);
+            //daemon_log(LOG_INFO, "INFO: %.*s", (int) size - 1, data);
             char *str = alloca(size + 1);
             if (str) {
                 memcpy(str, data, size);
