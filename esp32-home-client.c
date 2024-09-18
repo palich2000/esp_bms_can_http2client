@@ -380,9 +380,19 @@ static void publish_state(void) {
 
 void publish_sensors(void) {
     static uint64_t timer_publish_state = 0;
-    if (timer_publish_state > timeMillis()) return;
+    uint64_t now = timeMillis();
+    if (timer_publish_state > now) {
+        static uint64_t last = 0;
+        if (last < now) {
+            last = now;
+            return;
+        }
+        daemon_log(LOG_ERR, "Time loop detected");
+        last = now;
+        timer_publish_state = now + SENSORS_PUBLISH_INTERVAL;
+    }
     else {
-        timer_publish_state = timeMillis() + SENSORS_PUBLISH_INTERVAL;
+        timer_publish_state = now + SENSORS_PUBLISH_INTERVAL;
     }
 
     const char *topic = create_topic(MQTT_SENSOR_TOPIC);
