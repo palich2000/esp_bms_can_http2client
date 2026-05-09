@@ -41,6 +41,8 @@ char *hostname = NULL;
 char *pathname = NULL;
 const char *const application = "esp32-home-client";
 static int do_exit = 0;
+static int use_ibms = 0;
+static const char *ibms_url = "http://192.168.0.126/api";
 
 void publish_sensors(void);
 
@@ -119,6 +121,16 @@ static sensor_t sensors[] = {
      .value_name = "charging_status",
      .svalue = NULL,
      .tvalue = json_type_string},
+    {.id = "sensor-jk-bms-charged_energy",
+      .value_name = "charged_energy",
+      .dvalue = NAN,
+      .tvalue = json_type_double
+    },
+    {.id = "sensor-jk-bms-discharged_energy",
+      .value_name = "discharged_energy",
+      .dvalue = NAN,
+      .tvalue = json_type_double
+    },
 };
 
 sensor_t *is_sensor(json_object *id) {
@@ -291,6 +303,126 @@ int progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
     return 1;
   }
   return 0;
+}
+
+typedef struct {
+  char *data;
+  size_t size;
+} ibms_buf_t;
+
+static size_t write_callback_ibms(const void *ptr, size_t size, size_t nmemb,
+                                   void *userp) {
+  if (do_exit) return 0;
+  ibms_buf_t *buf = (ibms_buf_t *)userp;
+  size_t chunk = size * nmemb;
+  char *tmp = realloc(buf->data, buf->size + chunk + 1);
+  if (!tmp) return 0;
+  memcpy(tmp + buf->size, ptr, chunk);
+  buf->size += chunk;
+  tmp[buf->size] = '\0';
+  buf->data = tmp;
+  return chunk;
+}
+
+typedef struct {
+  const char *api_key;
+  sensor_t *sensor;
+} ibms_map_t;
+
+static ibms_map_t ibms_map[] = {
+    {"power_tube_temperature",    &sensors[0]},
+    {"temperature_sensor_1",      &sensors[1]},
+    {"temperature_sensor_2",      &sensors[2]},
+    {"total_voltage",             &sensors[3]},
+    {"capacity_remaining",        &sensors[4]},
+    {"current",                   &sensors[5]},
+    {"capacity_remaining_derived",&sensors[6]},
+    {"charge_status",             &sensors[7]},
+    {"charged_energy",            &sensors[8]},
+    {"discharged_energy",         &sensors[9]},
+};
+
+static void ibms_parse_and_update(const char *json_str) {
+  struct json_object *root = json_tokener_parse(json_str);
+  if (!root) {
+    daemon_log(LOG_ERR, "ibms: JSON parse error");
+    return;
+  }
+  for (size_t i = 0; i < sizeof(ibms_map) / sizeof(ibms_map[0]); i++) {
+    struct json_object *val;
+    if (!json_object_object_get_ex(root, ibms_map[i].api_key, &val)) continue;
+    sensor_t *s = ibms_map[i].sensor;
+    switch (s->tvalue) {
+    case json_type_double: {
+      double v = json_object_get_double(val);
+      if (s->dvalue != v) {
+        s->dvalue = v;
+        s->is_changed = true;
+      }
+      break;
+    }
+    case json_type_string: {
+      const char *sv = json_object_get_string(val);
+      if (!s->svalue || strcmp(s->svalue, sv) != 0) {
+        FREE(s->svalue);
+        s->svalue = strdup(sv);
+        s->is_changed = true;
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+  json_object_put(root);
+  publish_sensors();
+}
+
+#define IBMS_POLL_INTERVAL 5
+
+void *main_loop_ibms(void *UNUSED(param)) {
+  CURL *curl = curl_easy_init();
+  if (!curl) {
+    daemon_log(LOG_ERR, "ibms: curl_easy_init error");
+    return NULL;
+  }
+
+  curl_easy_setopt(curl, CURLOPT_URL, ibms_url);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback_ibms);
+  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+
+  bool connected = false;
+
+  while (!do_exit) {
+    ibms_buf_t buf = {NULL, 0};
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res == CURLE_OK) {
+      if (!connected) {
+        connected = true;
+        mqtt_publish_lwt(true);
+      }
+      if (buf.data) {
+        ibms_parse_and_update(buf.data);
+      }
+    } else {
+      daemon_log(LOG_ERR, "ibms: %s", curl_easy_strerror(res));
+      if (connected) {
+        connected = false;
+        mqtt_publish_lwt(false);
+      }
+      if (!do_exit) wd_sleep(10);
+    }
+
+    free(buf.data);
+
+    if (!do_exit) wd_sleep(IBMS_POLL_INTERVAL);
+  }
+
+  curl_easy_cleanup(curl);
+  return NULL;
 }
 
 void *main_loop(void *UNUSED(param)) {
@@ -657,7 +789,31 @@ static void mosq_destroy() {
   mosquitto_lib_cleanup();
 }
 
-void usage(void) { exit(1); }
+void usage(void) {
+  fprintf(stderr,
+    "Usage: %s [OPTIONS]\n"
+    "\n"
+    "Options:\n"
+    "  -k, --command CMD       Send command to running daemon:\n"
+    "                            reconfigure, shutdown, restart, check\n"
+    "  -i, --ident NAME        Daemon ident / PID file name (default: esp32-home-client)\n"
+    "  -f, --foreground        Run in foreground (don't daemonize)\n"
+    "  -d, --debug             Enable debug logging (toggle with SIGUSR1/SIGUSR2)\n"
+    "\n"
+    "  -h, --mqtt-host HOST    MQTT broker hostname (default: 192.168.0.106)\n"
+    "  -p, --mqtt-port PORT    MQTT broker port (default: 8883)\n"
+    "  -u, --mqtt-user USER    MQTT username (default: owntracks)\n"
+    "  -P, --mqtt-password PWD MQTT password\n"
+    "\n"
+    "  -T, --thermal-zone N    CPU thermal zone index for STATE topic (default: 0)\n"
+    "\n"
+    "  -I, --ibms              Use iBMS polling mode (GET /api) instead of SSE /events\n"
+    "  -U, --ibms-url URL      iBMS API URL (default: http://192.168.0.126/api)\n"
+    "\n"
+    "MQTT topics published: tele/{hostname}/LWT, tele/{hostname}/SENSOR, tele/{hostname}/STATE\n",
+    progname);
+  exit(1);
+}
 
 enum command_int_t {
   CMD_NONE = 0,
@@ -774,10 +930,12 @@ int main(int argc, char *const *argv) {
       {"mqtt-port", required_argument, 0, 'p'},
       {"mqtt-user", required_argument, 0, 'u'},
       {"mqtt-password", required_argument, 0, 'P'},
-      {"thremal-zone", required_argument, 0, 'T'},
+      {"thermal-zone", required_argument, 0, 'T'},
+      {"ibms",         no_argument,       0, 'I'},
+      {"ibms-url",     required_argument, 0, 'U'},
       {0, 0, 0, 0}};
 
-  while ((flags = getopt_long(argc, argv, "k:i:fdh:p:u:P:T:", long_options,
+  while ((flags = getopt_long(argc, argv, "k:i:fdh:p:u:P:T:IU:", long_options,
                               NULL)) != -1) {
 
     switch (flags) {
@@ -816,6 +974,14 @@ int main(int argc, char *const *argv) {
     }
     case 'T': {
       thermal_zone = atoi(optarg);
+      break;
+    }
+    case 'I': {
+      use_ibms = 1;
+      break;
+    }
+    case 'U': {
+      ibms_url = xstrdup(optarg);
       break;
     }
     default: {
@@ -920,7 +1086,7 @@ int main(int argc, char *const *argv) {
 
     mosq_init();
 
-    pthread_create(&main_th, NULL, main_loop, NULL);
+    pthread_create(&main_th, NULL, use_ibms ? main_loop_ibms : main_loop, NULL);
 
     fd_set fds;
     FD_ZERO(&fds);
