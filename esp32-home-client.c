@@ -10,6 +10,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include <getopt.h>
 #include <mosquitto.h>
@@ -122,15 +123,17 @@ static sensor_t sensors[] = {
      .svalue = NULL,
      .tvalue = json_type_string},
     {.id = "sensor-jk-bms-charged_energy",
-      .value_name = "charged_energy",
-      .dvalue = NAN,
-      .tvalue = json_type_double
-    },
+     .value_name = "charged_energy",
+     .dvalue = NAN,
+     .tvalue = json_type_double},
     {.id = "sensor-jk-bms-discharged_energy",
-      .value_name = "discharged_energy",
-      .dvalue = NAN,
-      .tvalue = json_type_double
-    },
+     .value_name = "discharged_energy",
+     .dvalue = NAN,
+     .tvalue = json_type_double},
+    {.id = "sensor-jk-bms-delta_cell_voltage",
+     .value_name = "delta_cell_voltage",
+     .dvalue = NAN,
+     .tvalue = json_type_double},
 };
 
 sensor_t *is_sensor(json_object *id) {
@@ -224,8 +227,9 @@ size_t write_callback(const void *data, size_t size, size_t nmemb,
                   break;
                 }
               } else {
-                daemon_log(LOG_ERR, "Type mismatch for sensor %s expected %d but %d", sensor->id,
-                  sensor->tvalue, vtype);
+                daemon_log(LOG_ERR,
+                           "Type mismatch for sensor %s expected %d but %d",
+                           sensor->id, sensor->tvalue, vtype);
               }
             }
             json_object_put(parsed_json);
@@ -311,12 +315,14 @@ typedef struct {
 } ibms_buf_t;
 
 static size_t write_callback_ibms(const void *ptr, size_t size, size_t nmemb,
-                                   void *userp) {
-  if (do_exit) return 0;
+                                  void *userp) {
+  if (do_exit)
+    return 0;
   ibms_buf_t *buf = (ibms_buf_t *)userp;
   size_t chunk = size * nmemb;
   char *tmp = realloc(buf->data, buf->size + chunk + 1);
-  if (!tmp) return 0;
+  if (!tmp)
+    return 0;
   memcpy(tmp + buf->size, ptr, chunk);
   buf->size += chunk;
   tmp[buf->size] = '\0';
@@ -329,18 +335,20 @@ typedef struct {
   sensor_t *sensor;
 } ibms_map_t;
 
-static ibms_map_t ibms_map[] = {
-    {"power_tube_temperature",    &sensors[0]},
-    {"temperature_sensor_1",      &sensors[1]},
-    {"temperature_sensor_2",      &sensors[2]},
-    {"total_voltage",             &sensors[3]},
-    {"capacity_remaining",        &sensors[4]},
-    {"current",                   &sensors[5]},
-    {"capacity_remaining_derived",&sensors[6]},
-    {"charge_status",             &sensors[7]},
-    {"charged_energy",            &sensors[8]},
-    {"discharged_energy",         &sensors[9]},
-};
+static ibms_map_t ibms_map[] = {{"power_tube_temperature", &sensors[0]},
+                                {"temperature_sensor_1", &sensors[1]},
+                                {"temperature_sensor_2", &sensors[2]},
+                                {"total_voltage", &sensors[3]},
+                                {"capacity_remaining", &sensors[4]},
+                                {"current", &sensors[5]},
+                                {"capacity_remaining_derived", &sensors[6]},
+                                {"charge_status", &sensors[7]},
+                                {"charged_energy", &sensors[8]},
+                                {"discharged_energy", &sensors[9]},
+                                {"delta_cell_voltage", &sensors[10]}};
+
+_Static_assert(sizeof(ibms_map) / sizeof(ibms_map[0]) == sizeof(sensors) /sizeof(sensors[0]),
+               "ibms_map and sensors size mismatch");
 
 static void ibms_parse_and_update(const char *json_str) {
   struct json_object *root = json_tokener_parse(json_str);
@@ -350,7 +358,8 @@ static void ibms_parse_and_update(const char *json_str) {
   }
   for (size_t i = 0; i < sizeof(ibms_map) / sizeof(ibms_map[0]); i++) {
     struct json_object *val;
-    if (!json_object_object_get_ex(root, ibms_map[i].api_key, &val)) continue;
+    if (!json_object_object_get_ex(root, ibms_map[i].api_key, &val))
+      continue;
     sensor_t *s = ibms_map[i].sensor;
     switch (s->tvalue) {
     case json_type_double: {
@@ -392,6 +401,13 @@ void *main_loop_ibms(void *UNUSED(param)) {
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 
+  // Prevent the poll thread from hanging forever on a stalled/half-open
+  // connection (device reboot, NAT timeout, etc). Without these a single
+  // curl_easy_perform() can block indefinitely and stop all polling.
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L); // max seconds to connect
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);       // max seconds per request
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);  // detect dead reused peer
+
   bool connected = false;
 
   while (!do_exit) {
@@ -413,12 +429,14 @@ void *main_loop_ibms(void *UNUSED(param)) {
         connected = false;
         mqtt_publish_lwt(false);
       }
-      if (!do_exit) wd_sleep(10);
+      if (!do_exit)
+        wd_sleep(10);
     }
 
     free(buf.data);
 
-    if (!do_exit) wd_sleep(IBMS_POLL_INTERVAL);
+    if (!do_exit)
+      wd_sleep(IBMS_POLL_INTERVAL);
   }
 
   curl_easy_cleanup(curl);
@@ -791,27 +809,34 @@ static void mosq_destroy() {
 
 void usage(void) {
   fprintf(stderr,
-    "Usage: %s [OPTIONS]\n"
-    "\n"
-    "Options:\n"
-    "  -k, --command CMD       Send command to running daemon:\n"
-    "                            reconfigure, shutdown, restart, check\n"
-    "  -i, --ident NAME        Daemon ident / PID file name (default: esp32-home-client)\n"
-    "  -f, --foreground        Run in foreground (don't daemonize)\n"
-    "  -d, --debug             Enable debug logging (toggle with SIGUSR1/SIGUSR2)\n"
-    "\n"
-    "  -h, --mqtt-host HOST    MQTT broker hostname (default: 192.168.0.106)\n"
-    "  -p, --mqtt-port PORT    MQTT broker port (default: 8883)\n"
-    "  -u, --mqtt-user USER    MQTT username (default: owntracks)\n"
-    "  -P, --mqtt-password PWD MQTT password\n"
-    "\n"
-    "  -T, --thermal-zone N    CPU thermal zone index for STATE topic (default: 0)\n"
-    "\n"
-    "  -I, --ibms              Use iBMS polling mode (GET /api) instead of SSE /events\n"
-    "  -U, --ibms-url URL      iBMS API URL (default: http://192.168.0.126/api)\n"
-    "\n"
-    "MQTT topics published: tele/{hostname}/LWT, tele/{hostname}/SENSOR, tele/{hostname}/STATE\n",
-    progname);
+          "Usage: %s [OPTIONS]\n"
+          "\n"
+          "Options:\n"
+          "  -k, --command CMD       Send command to running daemon:\n"
+          "                            reconfigure, shutdown, restart, check\n"
+          "  -i, --ident NAME        Daemon ident / PID file name (default: "
+          "esp32-home-client)\n"
+          "  -f, --foreground        Run in foreground (don't daemonize)\n"
+          "  -d, --debug             Enable debug logging (toggle with "
+          "SIGUSR1/SIGUSR2)\n"
+          "\n"
+          "  -h, --mqtt-host HOST    MQTT broker hostname (default: "
+          "192.168.0.106)\n"
+          "  -p, --mqtt-port PORT    MQTT broker port (default: 8883)\n"
+          "  -u, --mqtt-user USER    MQTT username (default: owntracks)\n"
+          "  -P, --mqtt-password PWD MQTT password\n"
+          "\n"
+          "  -T, --thermal-zone N    CPU thermal zone index for STATE topic "
+          "(default: 0)\n"
+          "\n"
+          "  -I, --ibms              Use iBMS polling mode (GET /api) instead "
+          "of SSE /events\n"
+          "  -U, --ibms-url URL      iBMS API URL (default: "
+          "http://192.168.0.126/api)\n"
+          "\n"
+          "MQTT topics published: tele/{hostname}/LWT, tele/{hostname}/SENSOR, "
+          "tele/{hostname}/STATE\n",
+          progname);
   exit(1);
 }
 
@@ -931,8 +956,8 @@ int main(int argc, char *const *argv) {
       {"mqtt-user", required_argument, 0, 'u'},
       {"mqtt-password", required_argument, 0, 'P'},
       {"thermal-zone", required_argument, 0, 'T'},
-      {"ibms",         no_argument,       0, 'I'},
-      {"ibms-url",     required_argument, 0, 'U'},
+      {"ibms", no_argument, 0, 'I'},
+      {"ibms-url", required_argument, 0, 'U'},
       {0, 0, 0, 0}};
 
   while ((flags = getopt_long(argc, argv, "k:i:fdh:p:u:P:T:IU:", long_options,

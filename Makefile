@@ -15,12 +15,13 @@ clean:
 	rm -rf $(TARGET)
 	rm -rf *.o
 
-rebuild:
-	$(clean)
-	$(CC) $(LDFLAGS) $(CCFLAGS) $(SOURCES) -o $(TARGET)
+rebuild: clean
+	$(CC) $(CCFLAGS) $(SOURCES) $(LDFLAGS) -o $(TARGET)
 
-test:
-	$(clean)
-	$(CC) $(LDFLAGS) $(CCFLAGS) $(TESTFLAGS) $(SOURCES) -o $(TARGET)
+test: clean
+	$(CC) $(CCFLAGS) $(TESTFLAGS) $(SOURCES) $(LDFLAGS) -o $(TARGET)
+
 install: $(TARGET)
 	install $(TARGET) ~/bin/
+
+.PHONY: all clean rebuild test install
