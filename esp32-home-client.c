@@ -83,6 +83,7 @@ typedef struct {
     double dvalue;
     char *svalue;
   };
+  int precision; // decimals for JSON output (double sensors)
   bool is_changed;
 } sensor_t;
 static sensor_t sensors[] = {
@@ -93,30 +94,37 @@ static sensor_t sensors[] = {
     {.id = "sensor-jk-bms-interface_power_tube_temperature",
      .value_name = "temp_tube",
      .dvalue = NAN,
+     .precision = 1,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_temperature_sensor_1",
      .value_name = "temp1",
      .dvalue = NAN,
+     .precision = 1,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_temperature_sensor_2",
      .value_name = "temp2",
      .dvalue = NAN,
+     .precision = 1,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_total_voltage",
      .value_name = "voltage",
      .dvalue = NAN,
+     .precision = 2,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_capacity_remaining",
      .value_name = "soc",
      .dvalue = NAN,
+     .precision = 0,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_current",
      .value_name = "current",
      .dvalue = NAN,
+     .precision = 2,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-interface_capacity_remaining_derived",
      .value_name = "capacity",
      .dvalue = NAN,
+     .precision = 1,
      .tvalue = json_type_double},
     {.id = "text_sensor-jk-bms-interface_charging_status",
      .value_name = "charging_status",
@@ -125,14 +133,17 @@ static sensor_t sensors[] = {
     {.id = "sensor-jk-bms-charged_energy",
      .value_name = "charged_energy",
      .dvalue = NAN,
+     .precision = 2,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-discharged_energy",
      .value_name = "discharged_energy",
      .dvalue = NAN,
+     .precision = 2,
      .tvalue = json_type_double},
     {.id = "sensor-jk-bms-delta_cell_voltage",
      .value_name = "delta_cell_voltage",
      .dvalue = NAN,
+     .precision = 3,
      .tvalue = json_type_double},
 };
 
@@ -633,7 +644,8 @@ void publish_sensors(void) {
     case json_type_double: {
       if (!isnan(sensors[i].dvalue)) {
         char buf[20] = {0};
-        snprintf(buf, sizeof(buf) - 1, "%.2f", sensors[i].dvalue);
+        snprintf(buf, sizeof(buf) - 1, "%.*f", sensors[i].precision,
+                 sensors[i].dvalue);
         json_object_object_add(
             j_root, sensors[i].value_name,
             json_object_new_double_s(sensors[i].dvalue, buf));
